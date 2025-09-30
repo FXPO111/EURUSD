@@ -14,9 +14,8 @@ import memory_logger
 
 from collections import deque
 
-from flask import Flask, send_from_directory, request
-from flask_socketio import SocketIO, emit
 from flask import Flask, send_from_directory, request, jsonify
+from flask_socketio import SocketIO, emit
 
 
 # ── тута свечки ──────────────────────────────────────────
@@ -501,6 +500,7 @@ def _eval_and_fire_conditionals():
     last = order_book.last_trade_price or account.mark_price()
     mark = account.mark_price()
     fired_indices = []
+    latest_snapshot = None
 
     for i, c in enumerate(list(_conditional)):  # копия для безопасного удаления
         ref = mark if c["trigger_by"] == "mark" else last
@@ -555,8 +555,9 @@ def _eval_and_fire_conditionals():
                 "maker": "system"
             }
             socketio.emit("trade", trade)
-            socketio.emit("account_update", account.snapshot())
-            socketio.emit("positions_update", account.snapshot())
+            latest_snapshot = account.snapshot()
+            socketio.emit("account_update", latest_snapshot)
+            socketio.emit("positions_update", latest_snapshot)
 
             logger.info(
                 f"[TP/SL] Trigger fired: type={c['type']}, side={c['side']}, trigger={c['trigger']}, ref={ref}, qty={qty}, px={px}"
@@ -572,19 +573,23 @@ def _eval_and_fire_conditionals():
         if idx < len(_conditional):
             _conditional.pop(idx)
 
+    if latest_snapshot is None:
+        latest_snapshot = account.snapshot()
     socketio.emit("conditional_update", _conditional)
-    socketio.emit("positions_update", account.snapshot())
+    socketio.emit("positions_update", latest_snapshot)
 
 
 
 def push_positions():
-    socketio.emit("positions_update", account.snapshot())
+    snapshot = account.snapshot()
+    socketio.emit("positions_update", snapshot)
     socketio.start_background_task(schedule_push)
 
 def schedule_push():
     while True:
         socketio.sleep(3)
-        socketio.emit("positions_update", account.snapshot())
+        snapshot = account.snapshot()
+        socketio.emit("positions_update", snapshot)
 socketio.start_background_task(schedule_push)
 
 # --- OHLC (свечи) ---
@@ -664,7 +669,8 @@ def handle_get_user_trades():
 
 @socketio.on('get_account')
 def handle_get_account():
-    emit("account_update", account.snapshot())
+    snapshot = account.snapshot()
+    emit("account_update", snapshot)
 
 # --- Socket.IO ---
 @socketio.on('connect')
@@ -679,7 +685,8 @@ def on_connect():
         t["initiator_side"] = "buy" if side_str in ("buy", "bid") else "sell"
         hist.append(t)
     emit("history", hist)
-    emit("account_update", account.snapshot())
+    snapshot = account.snapshot()
+    emit("account_update", snapshot)
     emit("conditional_update", _conditional)
 
 @socketio.on('set_conditionals')
@@ -797,8 +804,9 @@ def handle_add_order(data):
             logger.info(
                 f"[TP/SL] Conditional placed: side_close={side_close}, tp={tp}, sl={sl}, qty={cond_qty}, trig_by={trig_by}")
         emit("confirmation", {"message": f"Order {order.order_id} accepted"})
-        emit("account_update", account.snapshot())
-        socketio.emit("positions_update", account.snapshot())
+        snapshot = account.snapshot()
+        emit("account_update", snapshot)
+        socketio.emit("positions_update", snapshot)
     except Exception as e:
         logger.error(f"add_order error: {e}")
         emit("error", {"message": str(e)})
@@ -810,7 +818,8 @@ def handle_set_account(data):
         mode = data.get('mode', account.mode)
         account.leverage = max(1, min(125, lv))
         account.mode = "isolated" if str(mode).lower().startswith("изол") or mode=="isolated" else "cross"
-        emit("account_update", account.snapshot())
+        snapshot = account.snapshot()
+        emit("account_update", snapshot)
     except Exception as e:
         emit("error", {"message": f"set_account: {e}"})
 
@@ -850,7 +859,8 @@ def handle_cancel_order(data):
         return
     if order_book.cancel_order(oid):
         emit("confirmation", {"message": f"Order {oid} cancelled"})
-        emit("account_update", account.snapshot())
+        snapshot = account.snapshot()
+        emit("account_update", snapshot)
     else:
         emit("error", {"message": f"Order {oid} not found or inactive"})
 
@@ -904,8 +914,9 @@ def handle_close_position(data):
     }
 
     emit("confirmation", {"message": "Позиция закрыта"})
-    socketio.emit("account_update", account.snapshot())
-    socketio.emit("positions_update", account.snapshot())
+    snapshot = account.snapshot()
+    socketio.emit("account_update", snapshot)
+    socketio.emit("positions_update", snapshot)
     socketio.emit("trade", trade)
 
 @socketio.on('close_partial')
@@ -956,8 +967,9 @@ def handle_close_partial(data):
     }
 
     emit("confirmation", {"message": f"Закрыто {qty} контрактов"})
-    socketio.emit("account_update", account.snapshot())
-    socketio.emit("positions_update", account.snapshot())
+    snapshot = account.snapshot()
+    socketio.emit("account_update", snapshot)
+    socketio.emit("positions_update", snapshot)
     socketio.emit("trade", trade)
 
 
@@ -1038,8 +1050,9 @@ def notify_agent_fill(trade):
                             #fee_delta, realized_delta, account.equity())
             _emit_account_stats(socketio)
 
-    socketio.emit("account_update", account.snapshot())
-    socketio.emit("positions_update", account.snapshot())
+    snapshot = account.snapshot()
+    socketio.emit("account_update", snapshot)
+    socketio.emit("positions_update", snapshot)
 
 
 # --- Matching и трансляция ---
@@ -1054,7 +1067,8 @@ def match_and_broadcast():
 
             # активируем условные TP/SL
             _eval_and_fire_conditionals()
-            socketio.emit("account_update", account.snapshot())
+            snapshot = account.snapshot()
+            socketio.emit("account_update", snapshot)
 
             # ---------- агрегированная сводка раз в минуту ----------
             now = time.time()
@@ -1134,7 +1148,8 @@ def match_and_broadcast():
             logger.error(f"match loop error: {e}")
             # пушим состояние аккаунта на фронт
 
-        socketio.emit("account_update", account.snapshot())
+        snapshot = account.snapshot()
+        socketio.emit("account_update", snapshot)
         socketio.sleep(0.3)
 
 def _log_user_trade(side, price, qty, is_taker, fee_delta, realized_delta, equity_after):
