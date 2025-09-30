@@ -100,12 +100,30 @@ class OrderBook:
             return self._match_market_order(order)
 
 
+    def _cleanup_inactive_order(self, order: Order):
+        """Remove order from global registry once it is no longer active."""
+        if not order.is_active():
+            self.orders.pop(order.order_id, None)
+
     def cancel_order(self, order_id: str) -> bool:
         order = self.orders.get(order_id)
-        if order and order.is_active():
-            order.cancel()
-            return True
-        return False
+        if not order:
+            return False
+
+        was_active = order.is_active()
+        order.cancel()
+
+        # remove from price level book as soon as possible
+        if order.price is not None:
+            book = self.bids if order.side == OrderSide.BID else self.asks
+            level = book.get(order.price)
+            if level:
+                level.remove_filled_or_inactive_orders()
+                if not level:
+                    self._remove_price_level_if_empty(order.side, order.price)
+
+        self._cleanup_inactive_order(order)
+        return was_active
 
     def _match_market_order(self, market_order: Order) -> List[Dict[str, Any]]:
         trades = []
@@ -140,6 +158,8 @@ class OrderBook:
             market_order.fill(trade_qty)
             resting_order.fill(trade_qty)
 
+            self._cleanup_inactive_order(resting_order)
+
             trades_for_slippage_calc.append((trade_qty, best_price))
 
             timestamp = time.time()
@@ -163,6 +183,8 @@ class OrderBook:
                     best_price
                 )
 
+        self._cleanup_inactive_order(market_order)
+
         if trades_for_slippage_calc:
             traded_value = sum(q * p for q, p in trades_for_slippage_calc)
             total_qty = sum(q for q, _ in trades_for_slippage_calc)
@@ -170,6 +192,7 @@ class OrderBook:
 
         if market_order.remaining_volume() > 0:
             market_order.cancel()
+            self._cleanup_inactive_order(market_order)
 
         return trades
 
@@ -215,6 +238,9 @@ class OrderBook:
 
             bid_order.fill(trade_qty)
             ask_order.fill(trade_qty)
+
+            self._cleanup_inactive_order(bid_order)
+            self._cleanup_inactive_order(ask_order)
 
             self.last_trade_price = trade_price
             timestamp = time.time()
