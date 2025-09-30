@@ -158,7 +158,7 @@ signal.signal(signal.SIGTERM, graceful_shutdown)
 saved_liquidity = load_liquidity_state(liquidity_conn)
 
 
-market_phases_history = []
+market_phases_history = deque(maxlen=10_000)
 _last_phase_name = None
 _last_phase_start = None
 _last_microphase = None
@@ -633,6 +633,13 @@ phase_tracker = PhaseTracker()
 USER_ORDERS = {}  # order_id -> {"is_taker": bool}
 
 
+def _cleanup_user_order(order_id: str):
+    """Drop user order metadata when it is no longer active."""
+    order = order_book.orders.get(order_id)
+    if order is None or not order.is_active():
+        USER_ORDERS.pop(order_id, None)
+
+
 
 # --- HTTP ---
 @app.route('/')
@@ -858,6 +865,7 @@ def handle_cancel_order(data):
         emit("error", {"message": "Missing order_id"})
         return
     if order_book.cancel_order(oid):
+        _cleanup_user_order(oid)
         emit("confirmation", {"message": f"Order {oid} cancelled"})
         snapshot = account.snapshot()
         emit("account_update", snapshot)
@@ -1038,6 +1046,7 @@ def notify_agent_fill(trade):
             #_log_user_trade("buy", trade['price'], trade['volume'], meta["is_taker"],
                             #fee_delta, realized_delta, account.equity())
             _emit_account_stats(socketio)
+            _cleanup_user_order(trade['buy_order_id'])
 
         if trade['sell_agent'] == USER_ID:
             meta = USER_ORDERS.get(trade['sell_order_id'], {"is_taker": True})
@@ -1049,6 +1058,7 @@ def notify_agent_fill(trade):
             #_log_user_trade("sell", trade['price'], trade['volume'], meta["is_taker"],
                             #fee_delta, realized_delta, account.equity())
             _emit_account_stats(socketio)
+            _cleanup_user_order(trade['sell_order_id'])
 
     snapshot = account.snapshot()
     socketio.emit("account_update", snapshot)
